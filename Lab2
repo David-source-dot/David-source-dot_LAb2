@@ -1,0 +1,203 @@
+import os
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.hmac import HMAC
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.backends import default_backend
+# AES функція
+#генерація ключа AES
+def generate_aes_key_and_iv(password: bytes, salt: bytes):
+    kdf = Scrypt(salt=salt, length=32, n=2**14, r=8, p=1, backend=default_backend())
+    derived_key = kdf.derive(password)
+    iv = os.urandom(16)
+    return derived_key, iv
+#AES шифрування
+def aes_encrypt(file_in: str, file_out: str, password: bytes):
+    salt = os.urandom(16)
+    key, iv = generate_aes_key_and_iv(password, salt)
+    with open(file_in, 'rb') as f:
+        content = f.read()
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+    encryptor = cipher.encryptor()
+    padded_content = content + b"\0" * (16 - len(content) % 16)
+    encrypted_content = encryptor.update(padded_content) + encryptor.finalize()
+    mac = HMAC(key, hashes.SHA256(), backend=default_backend())
+    mac.update(encrypted_content)
+    tag = mac.finalize()
+    with open(file_out, 'wb') as f:
+        f.write(salt + iv + tag + encrypted_content)
+#AES дешифрування
+def aes_decrypt(file_in: str, file_out: str, password: bytes):
+    with open(file_in, 'rb') as f:
+        salt, iv, tag = f.read(16), f.read(16), f.read(32)
+        encrypted_content = f.read()
+    key, _ = generate_aes_key_and_iv(password, salt)
+    mac = HMAC(key, hashes.SHA256(), backend=default_backend())
+    mac.update(encrypted_content)
+    mac.verify(tag)
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+    decryptor = cipher.decryptor()
+    decrypted_content = decryptor.update(encrypted_content) + decryptor.finalize()
+    original_content = decrypted_content.rstrip(b"\0")
+    with open(file_out, 'wb') as f:
+        f.write(original_content)
+# RSA функція
+#створення публічного та приватного ключа
+def create_rsa_key_pair():
+    priv_key = rsa.generate_private_key(public_exponent=65537, key_size=2048, backend=default_backend())
+    pub_key = priv_key.public_key()
+    return priv_key, pub_key
+def rsa_encrypt_message(data: bytes, rsa_pub_key):
+    return rsa_pub_key.encrypt(
+        data,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
+def rsa_decrypt_message(encrypted_data: bytes, rsa_priv_key):
+    return rsa_priv_key.decrypt(
+        encrypted_data,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
+#RSA шифрування
+def rsa_encrypt_file(file_in: str, file_out: str, public_key_file: str):
+    with open(public_key_file, "rb") as key_file:
+        pub_key = serialization.load_pem_public_key(key_file.read(), backend=default_backend())
+    with open(file_in, "rb") as f:
+        content = f.read()
+    encrypted_content = rsa_encrypt_message(content, pub_key)
+    with open(file_out, "wb") as f:
+        f.write(encrypted_content)
+#RSA дешифрування
+def rsa_decrypt_file(file_in: str, file_out: str, private_key_file: str):
+    with open(private_key_file, "rb") as key_file:
+        priv_key = serialization.load_pem_private_key(key_file.read(), password=None, backend=default_backend())
+    with open(file_in, "rb") as f:
+        encrypted_content = f.read()
+    decrypted_content = rsa_decrypt_message(encrypted_content, priv_key)
+    with open(file_out, "wb") as f:
+        f.write(decrypted_content)
+#створення підпису
+def create_signature(file_in: str, priv_key_file: str, sign_out: str):
+    with open(priv_key_file, "rb") as key_file:
+        priv_key = serialization.load_pem_private_key(key_file.read(), password=None, backend=default_backend())
+    with open(file_in, "rb") as f:
+        data = f.read()
+    signature = priv_key.sign(
+        data,
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.MAX_LENGTH
+        ),
+        hashes.SHA256()
+    )
+    with open(sign_out, "wb") as f:
+        f.write(signature)
+#Перевірка підпису
+def check_signature(file_in: str, pub_key_file: str, signature_file: str):
+    with open(pub_key_file, "rb") as key_file:
+        pub_key = serialization.load_pem_public_key(key_file.read(), backend=default_backend())
+    with open(file_in, "rb") as f:
+        data = f.read()
+    with open(signature_file, "rb") as f:
+        signature = f.read()
+    try:
+        pub_key.verify(
+            signature,
+            data,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256()
+        )
+        return True
+    except Exception:
+        return False
+# Символи для паролю
+def generate_random_password(length):
+    chars = r'!\"#$%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~'
+    return "".join(chars[os.urandom(1)[0] % len(chars)] for _ in range(length))
+# кнопочки та коментарії
+class EncryptionApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Шифратор")
+        self.root.config(bg="#FFCCCC")  #Фон
+        self.root.geometry("400x300")   #Базовий розмір вікна
+        self.root.resizable(0, 0)  #Не зміниш розмір вікна
+        tk.Button(root, text="Шифрування методом AES", command=self.encrypt_aes).pack()
+        tk.Button(root, text="Дешифрування методом AES", command=self.decrypt_aes).pack()
+        tk.Button(root, text="Згенерувати публічний та приватний ключ RSA", command=self.generate_rsa_keys).pack()
+        tk.Button(root, text="Шифрування методом RSA", command=self.encrypt_rsa).pack()
+        tk.Button(root, text="Дешифрування методом RSA", command=self.decrypt_rsa).pack()
+        tk.Button(root, text="Зробити електронний підпис", command=self.sign_file).pack()
+        tk.Button(root, text="Перевірка електронного підпису", command=self.verify_signature).pack()
+        tk.Label(root, text="Введіть пароль для дешифрування методом AES:").pack()
+        self.password_entry = tk.Entry(root, show="*")
+        self.password_entry.pack()
+    def encrypt_aes(self):
+        file_in = filedialog.askopenfilename(title="Виберіть текстовий файл для шифрування")
+        file_out = filedialog.asksaveasfilename(title="Зберегти зашифрований файл як")
+        generated_password = generate_random_password(10)
+        with open('aes_password.txt', "w") as f:
+            f.write(generated_password)
+        aes_encrypt(file_in, file_out, generated_password.encode())
+        messagebox.showinfo("Повідомлення", "Ваш файл зашифрований за допомогою AES!")
+    def decrypt_aes(self):
+        file_in = filedialog.askopenfilename(title="Виберіть текстовий файл для дешифрування")
+        file_out = filedialog.asksaveasfilename(title="Зберегти дешифрований файл як")
+        password = self.password_entry.get().encode()
+        aes_decrypt(file_in, file_out, password)
+        messagebox.showinfo("Повідомлення", "Ваш файл дешифрований за допомогою AES!")
+    def generate_rsa_keys(self):
+        priv_key, pub_key = create_rsa_key_pair()
+        file_path = filedialog.asksaveasfilename(title="Виберіть назву для публічного та приватного ключа RSA")
+        base_name = os.path.splitext(file_path)[0]
+        with open(base_name + "_private.pem", "wb") as f:
+            f.write(priv_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption()
+            ))
+        with open(base_name + "_public.pem", "wb") as f:
+            f.write(pub_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            ))
+        messagebox.showinfo("Повідомлення", "RSA ключі згенеровані та збережені!")
+    def encrypt_rsa(self):
+        file_in = filedialog.askopenfilename(title="Виберіть текстовий файл для шифрування")
+        file_out = filedialog.asksaveasfilename(title="Зберегти зашифрований файл як")
+        public_key_file = filedialog.askopenfilename(title="Виберіть публічний ключ")
+        rsa_encrypt_file(file_in, file_out, public_key_file)
+        messagebox.showinfo("Повідомлення", "Файл зашифровано за допомогою RSA!")
+    def decrypt_rsa(self):
+        file_in = filedialog.askopenfilename(title="Виберіть текстовий файл для дешифрування")
+        file_out = filedialog.asksaveasfilename(title="Зберегти дешифрований файл як")
+        private_key_file = filedialog.askopenfilename(title="Виберіть приватний ключ")
+        rsa_decrypt_file(file_in, file_out, private_key_file)
+        messagebox.showinfo("Повідомлення", "Файл дешифровано за допомогою RSA!")
+    def sign_file(self):
+        file_in = filedialog.askopenfilename(title="Виберіть файл для підпису")
+        private_key_file = filedialog.askopenfilename(title="Виберіть приватний ключ")
+        sign_out = filedialog.asksaveasfilename(title="Зберегти підпис як")
+        create_signature(file_in, private_key_file, sign_out)
+        messagebox.showinfo("Повідомлення", "Файл підписано успішно!")
+    def verify_signature(self):
+        file_in = filedialog.askopenfilename(title="Виберіть файл для перевірки")
+        public_key_file = filedialog.askopenfilename(title="Виберіть публічний ключ")
+        signature_file = filedialog.askopenfilename(title="Виберіть файл з підписом")
+        if check_signature(file_in, public_key_file, signature_file):
+            messagebox.showinfo("Повідомлення", "Підпис являється дійсним!")
+        else:
+            messagebox.showerror("Повідомлення", "Файл не пройшов перевірку підпису!")
